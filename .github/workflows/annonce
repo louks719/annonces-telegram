@@ -1,0 +1,30 @@
+name: Annonce Telegram
+
+on:
+  schedule:
+    - cron: "50 9 * * *"
+    - cron: "50 10 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "verifier = liste les groupes sans poster / poster = poste maintenant"
+        default: verifier
+        type: choice
+        options: [verifier, poster]
+
+jobs:
+  annonce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python poster.py ${{ inputs.mode || 'poster' }}
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION: ${{ secrets.SESSION }}
+          CRON: ${{ github.event.schedule }}
