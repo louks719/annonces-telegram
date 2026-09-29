@@ -1,1 +1,2 @@
 telethon==1.45.*
+cryptography==46.*
