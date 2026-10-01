@@ -155,7 +155,25 @@ async def connecte(job, client, sync_folder=None):
         "phone": "+" + me.phone if me.phone else None,
     })
     log("Compte connecté : %s", me.first_name)
+    await envoyer_profil(job, client)
     await envoyer_groupes(job, client, activate_folder=sync_folder)  # on liste ses groupes tout de suite
+
+
+async def envoyer_profil(job, client):
+    """Envoie au CRM le prénom, le nom et la petite photo Telegram du compte (pour les afficher dans Comptes)."""
+    me = await client.get_me()
+    photo = None
+    try:
+        data = await client.download_profile_photo("me", file=bytes, download_big=False)
+        if data:
+            photo = "data:image/jpeg;base64," + base64.b64encode(data).decode()
+    except Exception:  # noqa: BLE001  (pas de photo, ou photo illisible : pas grave)
+        pass
+    crm("POST", f"/runner/job/{job['id']}/account", {
+        "tg_first_name": me.first_name or "", "tg_last_name": getattr(me, "last_name", None) or "",
+        "tg_username": me.username, "tg_photo": photo,
+    })
+    return me
 
 
 def etat(job, login_state, message):
@@ -259,7 +277,7 @@ async def profil(job, client):
         image.name = "photo.jpg"
         fichier = await client.upload_file(image)
         await client(functions.photos.UploadProfilePhotoRequest(file=fichier))
-    me = await client.get_me()
+    me = await envoyer_profil(job, client)
     nom = getattr(me, "last_name", None) or ""
     log("Profil mis à jour : %s %s", me.first_name, nom)
     return {"first_name": me.first_name, "last_name": nom}
@@ -364,6 +382,7 @@ async def main(job_id):
                 crm("POST", f"/runner/job/{job_id}/account", {"status": "disconnected", "login_state": "idle"})
                 raise Echec("Le compte n'est plus connecté : clique sur Reconnecter dans le CRM")
             if job["type"] == "sync":
+                await envoyer_profil(job, client)
                 resultat = {"groups": await envoyer_groupes(job, client)}
             elif job["type"] == "join":
                 resultat = await rejoindre(job, client)
