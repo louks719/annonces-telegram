@@ -7,6 +7,8 @@ Secrets GitHub nécessaires : API_ID, API_HASH, CRM_URL, RUNNER_TOKEN, SESSION_K
 (+ SESSION, l'ancienne clé du compte principal, seulement pour l'importer une fois).
 """
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
@@ -246,6 +248,23 @@ async def rejoindre(job, client):
     return {"title": entite.title}
 
 
+# ------------------------------------------------------------ profil (photo, prénom, nom, bio)
+async def profil(job, client):
+    p = job["payload"]
+    if any(k in p for k in ("first_name", "last_name", "about")):
+        await client(functions.account.UpdateProfileRequest(
+            first_name=p.get("first_name") or None, last_name=p.get("last_name"), about=p.get("about")))
+    if p.get("photo"):
+        image = io.BytesIO(base64.b64decode(p["photo"].split(",", 1)[1]))
+        image.name = "photo.jpg"
+        fichier = await client.upload_file(image)
+        await client(functions.photos.UploadProfilePhotoRequest(file=fichier))
+    me = await client.get_me()
+    nom = getattr(me, "last_name", None) or ""
+    log("Profil mis à jour : %s %s", me.first_name, nom)
+    return {"first_name": me.first_name, "last_name": nom}
+
+
 # ------------------------------------------------------------ annonces
 async def poster(job, client, groupes):
     attente = job["not_before"] - time.time()
@@ -348,6 +367,8 @@ async def main(job_id):
                 resultat = {"groups": await envoyer_groupes(job, client)}
             elif job["type"] == "join":
                 resultat = await rejoindre(job, client)
+            elif job["type"] == "profile":
+                resultat = await profil(job, client)
             elif job["type"] == "test":
                 await client.send_message("me", data["text"], link_preview=False)
             elif job["type"] == "post":
