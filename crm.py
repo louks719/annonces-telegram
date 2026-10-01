@@ -33,12 +33,14 @@ PAUSE_MAX = int(os.environ.get("PAUSE_MAX") or 90)
 
 # Erreurs Telegram -> (statut, texte affiché dans le CRM)
 ERREURS = {
-    "ChatWriteForbiddenError": ("write_forbidden", "Écriture bloquée"),
-    "ChatAdminRequiredError": ("write_forbidden", "Écriture bloquée"),
-    "ChatRestrictedError": ("write_forbidden", "Écriture bloquée"),
-    "ChatSendPlainForbiddenError": ("write_forbidden", "Texte interdit"),
-    "UserBannedInChannelError": ("banned", "Exclu du groupe"),
-    "ChannelPrivateError": ("banned", "Exclu du groupe"),
+    "ChatWriteForbiddenError": ("write_forbidden", "Écriture réservée aux admins"),
+    "ChatAdminRequiredError": ("write_forbidden", "Écriture réservée aux admins"),
+    "ChatRestrictedError": ("write_forbidden", "Écriture limitée par les admins"),
+    "ChatSendPlainForbiddenError": ("write_forbidden", "Messages texte interdits dans ce groupe"),
+    "ChatGuestSendForbiddenError": ("write_forbidden", "Il faut d'abord rejoindre le groupe"),
+    # Telegram a limité le compte (signalé pour spam) : il ne peut plus écrire dans les groupes
+    "UserBannedInChannelError": ("limited", "Compte limité par Telegram (spam) : vérifie avec @SpamBot"),
+    "ChannelPrivateError": ("banned", "Exclu par les admins (ou groupe supprimé)"),
     "UserNotParticipantError": ("banned", "Plus membre du groupe"),
     "ChatIdInvalidError": ("banned", "Groupe introuvable"),
     "PeerIdInvalidError": ("banned", "Groupe introuvable"),
@@ -255,13 +257,30 @@ async def poster(job, client, groupes):
         if i:
             await asyncio.sleep(random.randint(PAUSE_MIN, PAUSE_MAX))
         statut, detail = await envoyer(client, g)
-        crm("POST", f"/runner/job/{job['id']}/post", {"group_id": g["id"], "status": statut, "detail": detail})
+        crm("POST", f"/runner/job/{job['id']}/post", {"group_id": g["id"], "status": statut, "detail": detail,
+                                                      "topic_id": g["topic_id"] if g.get("nouveau_sujet") else None})
         log("%s %s%s", "✅" if statut == "sent" else "❌", g["title"], f" : {detail}" if detail else "")
         ok += statut == "sent"
         if statut == "disconnected":
             crm("POST", f"/runner/job/{job['id']}/account", {"status": "disconnected", "login_state": "idle"})
             raise Echec("Le compte a été déconnecté de Telegram")
+        if statut == "limited":
+            # inutile d'insister dans les autres groupes : on arrête pour ne pas aggraver la limitation
+            raise Echec("Compte limité par Telegram (spam) : envois arrêtés. Vérifie avec @SpamBot")
     return {"sent": ok, "total": len(groupes)}
+
+
+MOTS_SUJET = ("job", "recrut", "annonce", "offre", "emploi", "travail", "mission", "pub", "promo", "business", "staff", "va ", "vas ", "agence")
+
+
+async def sujet_ouvert(client, entite):
+    """Groupe à sujets (forum) : renvoie (id, titre) d'un sujet ouvert, de préférence un sujet « jobs / annonces »."""
+    res = await client(functions.messages.GetForumTopicsRequest(peer=entite, offset_date=None, offset_id=0, offset_topic=0, limit=100))
+    ouverts = [t for t in res.topics if isinstance(t, types.ForumTopic) and not t.closed and not t.hidden]
+    for t in ouverts:
+        if any(m in (t.title.lower() + " ") for m in MOTS_SUJET):
+            return t.id, t.title
+    return (ouverts[0].id, ouverts[0].title) if ouverts else (None, None)
 
 
 async def envoyer(client, g):
@@ -274,11 +293,22 @@ async def envoyer(client, g):
                 if entite is None:
                     raise
             await client.send_message(entite, g["text"], reply_to=g.get("topic_id") or None, link_preview=False)
-            return "sent", None
+            return "sent", (f"Posté dans le sujet « {g['nouveau_sujet']} »" if g.get("nouveau_sujet") else None)
         except errors.RPCError as e:
             nom = type(e).__name__
             if nom in SESSION_MORTE:
                 return "disconnected", "Compte déconnecté"
+            if "TOPIC_CLOSED" in str(e) and essai == 1:
+                # le sujet « Général » est fermé : on poste dans un sujet ouvert, et le CRM le retient pour la suite
+                try:
+                    sid, titre = await sujet_ouvert(client, entite)
+                except errors.RPCError:
+                    sid, titre = None, None
+                if not sid:
+                    return "write_forbidden", "Sujet fermé et aucun sujet ouvert"
+                g["topic_id"], g["nouveau_sujet"] = sid, titre
+                log("Sujet fermé : on essaie le sujet « %s »", titre)
+                continue
             if "TOPIC_CLOSED" in str(e):
                 return "write_forbidden", "Sujet fermé"
             secondes = getattr(e, "seconds", 0) or 0
