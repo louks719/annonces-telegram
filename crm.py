@@ -283,6 +283,20 @@ async def profil(job, client):
     return {"first_name": me.first_name, "last_name": nom}
 
 
+# ------------------------------------------------------------ vérification auprès de @SpamBot
+async def verifier_spambot(client):
+    """Demande à @SpamBot (le bot officiel de Telegram) si le compte est limité, et renvoie sa réponse."""
+    bot = await client.get_entity("SpamBot")
+    await client.send_message(bot, "/start")
+    for _ in range(10):
+        await asyncio.sleep(2)
+        msgs = await client.get_messages(bot, limit=1)
+        if msgs and not msgs[0].out:
+            log("Réponse de @SpamBot : %s", msgs[0].message[:200])
+            return {"spambot": msgs[0].message}
+    return {"spambot": "Pas de réponse de @SpamBot pour le moment, réessaie plus tard."}
+
+
 # ------------------------------------------------------------ annonces
 async def poster(job, client, groupes):
     attente = job["not_before"] - time.time()
@@ -388,6 +402,8 @@ async def main(job_id):
                 resultat = await rejoindre(job, client)
             elif job["type"] == "profile":
                 resultat = await profil(job, client)
+            elif job["type"] == "spamcheck":
+                resultat = await verifier_spambot(client)
             elif job["type"] == "test":
                 await client.send_message("me", data["text"], link_preview=False)
             elif job["type"] == "post":
