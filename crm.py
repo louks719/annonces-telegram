@@ -315,6 +315,31 @@ async def lire_code(client):
 
 
 # ------------------------------------------------------------ annonces
+def lien_message(entite, msg_id, topic_id=None):
+    """Lien t.me qui ouvre directement le message (groupe public : par son nom ; privé : par son numéro)."""
+    sujet = f"{topic_id}/" if topic_id else ""
+    if getattr(entite, "username", None):
+        return f"https://t.me/{entite.username}/{sujet}{msg_id}"
+    eid = entite.id if hasattr(entite, "id") else utils.resolve_id(entite)[0]
+    return f"https://t.me/c/{eid}/{sujet}{msg_id}"
+
+
+async def verifier_annonces(job, client, a_verifier):
+    """Les annonces précédentes du compte sont-elles toujours dans les groupes ? (un bot ou un admin a pu les effacer)"""
+    resultats = []
+    for p in a_verifier:
+        try:
+            entite = await client.get_entity(p["chat_id"])
+            msg = (await client.get_messages(entite, ids=[p["msg_id"]]))[0]
+            resultats.append({"id": p["id"], "exists": msg is not None})
+        except Exception as e:  # noqa: BLE001  groupe quitté, introuvable… : on ne conclut rien
+            log("Vérification impossible (%s) : %s", p["chat_id"], type(e).__name__)
+    if resultats:
+        crm("POST", f"/runner/job/{job['id']}/checked", {"items": resultats})
+        partis = sum(not r["exists"] for r in resultats)
+        log("Vérification : %d annonce(s) précédente(s), %d supprimée(s) par le groupe.", len(resultats), partis)
+
+
 async def poster(job, client, groupes):
     attente = job["not_before"] - time.time()
     if attente > 0:
@@ -326,7 +351,8 @@ async def poster(job, client, groupes):
             await asyncio.sleep(random.randint(PAUSE_MIN, PAUSE_MAX))
         statut, detail = await envoyer(client, g)
         crm("POST", f"/runner/job/{job['id']}/post", {"group_id": g["id"], "status": statut, "detail": detail,
-                                                      "topic_id": g["topic_id"] if g.get("nouveau_sujet") else None})
+                                                      "topic_id": g["topic_id"] if g.get("nouveau_sujet") else None,
+                                                      "msg_id": g.get("msg_id"), "msg_link": g.get("msg_link")})
         log("%s %s%s", "✅" if statut == "sent" else "❌", g["title"], f" : {detail}" if detail else "")
         ok += statut == "sent"
         if statut == "disconnected":
@@ -360,7 +386,8 @@ async def envoyer(client, g):
                 entite = await client.get_entity(lire_lien(g["link"])[1]) if g.get("link") else None
                 if entite is None:
                     raise
-            await client.send_message(entite, g["text"], reply_to=g.get("topic_id") or None, link_preview=False)
+            msg = await client.send_message(entite, g["text"], reply_to=g.get("topic_id") or None, link_preview=False)
+            g["msg_id"], g["msg_link"] = msg.id, lien_message(entite, msg.id, g.get("topic_id"))
             return "sent", (f"Posté dans le sujet « {g['nouveau_sujet']} »" if g.get("nouveau_sujet") else None)
         except errors.RPCError as e:
             nom = type(e).__name__
@@ -426,6 +453,8 @@ async def main(job_id):
             elif job["type"] == "test":
                 await client.send_message("me", data["text"], link_preview=False)
             elif job["type"] == "post":
+                if data.get("check"):
+                    await verifier_annonces(job, client, data["check"])
                 resultat = await poster(job, client, data["groups"])
         crm("POST", f"/runner/job/{job_id}/done", {"ok": True, "result": resultat})
     except Echec as e:
