@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -297,6 +298,22 @@ async def verifier_spambot(client):
     return {"spambot": "Pas de réponse de @SpamBot pour le moment, réessaie plus tard."}
 
 
+# ------------------------------------------------------------ code de connexion
+async def lire_code(client):
+    """Lit le dernier code de connexion envoyé par Telegram (compte officiel 777000), s'il date de moins de 10 min.
+    Le code n'est jamais écrit dans les journaux GitHub."""
+    for _ in range(6):
+        for msg in await client.get_messages(777000, limit=3):
+            age = time.time() - msg.date.timestamp()
+            code = re.search(r"\b(\d{5,6})\b", msg.message or "")
+            if code and age < 600:
+                log("Code de connexion trouvé (reçu il y a %d s).", age)
+                return {"code": code.group(1), "ago": f"il y a {int(age // 60)} min" if age >= 60 else "à l'instant"}
+        await asyncio.sleep(5)
+    log("Aucun code de connexion récent.")
+    return {"code": None}
+
+
 # ------------------------------------------------------------ annonces
 async def poster(job, client, groupes):
     attente = job["not_before"] - time.time()
@@ -402,6 +419,8 @@ async def main(job_id):
                 resultat = await rejoindre(job, client)
             elif job["type"] == "profile":
                 resultat = await profil(job, client)
+            elif job["type"] == "tgcode":
+                resultat = await lire_code(client)
             elif job["type"] == "spamcheck":
                 resultat = await verifier_spambot(client)
             elif job["type"] == "test":
