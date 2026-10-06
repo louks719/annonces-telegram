@@ -332,7 +332,10 @@ async def verifier_annonces(job, client, a_verifier):
             entite = await client.get_entity(p["chat_id"])
             msg = (await client.get_messages(entite, ids=[p["msg_id"]]))[0]
             resultats.append({"id": p["id"], "exists": msg is not None})
-        except Exception as e:  # noqa: BLE001  groupe quitté, introuvable… : on ne conclut rien
+        except (errors.ChannelPrivateError, errors.UserNotParticipantError, errors.ChatForbiddenError):
+            # le compte n'est plus dans le groupe (exclu, ou captcha d'arrivée jamais validé) : l'annonce n'est plus visible
+            resultats.append({"id": p["id"], "exists": False, "reason": "kicked"})
+        except Exception as e:  # noqa: BLE001  autre souci (réseau…) : on ne conclut rien
             log("Vérification impossible (%s) : %s", p["chat_id"], type(e).__name__)
     if resultats:
         crm("POST", f"/runner/job/{job['id']}/checked", {"items": resultats})
@@ -387,7 +390,13 @@ async def envoyer(client, g):
                 if entite is None:
                     raise
             msg = await client.send_message(entite, g["text"], reply_to=g.get("topic_id") or None, link_preview=False)
-            g["msg_id"], g["msg_link"] = msg.id, lien_message(entite, msg.id, g.get("topic_id"))
+            # Telegram ne renvoie pas toujours le message créé (certains groupes) : l'envoi compte quand même,
+            # simplement sans lien « Voir le message » ni vérification ensuite
+            if getattr(msg, "id", None):
+                try:
+                    g["msg_id"], g["msg_link"] = msg.id, lien_message(entite, msg.id, g.get("topic_id"))
+                except Exception:  # noqa: BLE001
+                    g["msg_id"] = msg.id
             return "sent", (f"Posté dans le sujet « {g['nouveau_sujet']} »" if g.get("nouveau_sujet") else None)
         except errors.RPCError as e:
             nom = type(e).__name__
@@ -446,6 +455,8 @@ async def main(job_id):
                 resultat = await rejoindre(job, client)
             elif job["type"] == "profile":
                 resultat = await profil(job, client)
+            elif job["type"] == "check":
+                await verifier_annonces(job, client, data.get("check") or [])
             elif job["type"] == "tgcode":
                 resultat = await lire_code(client)
             elif job["type"] == "spamcheck":
@@ -454,7 +465,10 @@ async def main(job_id):
                 await client.send_message("me", data["text"], link_preview=False)
             elif job["type"] == "post":
                 if data.get("check"):
-                    await verifier_annonces(job, client, data["check"])
+                    try:  # la vérification ne doit jamais empêcher l'envoi
+                        await verifier_annonces(job, client, data["check"])
+                    except Exception as e:  # noqa: BLE001
+                        log("Vérification des annonces sautée : %s", f"{type(e).__name__} : {e}"[:200])
                 resultat = await poster(job, client, data["groups"])
         crm("POST", f"/runner/job/{job_id}/done", {"ok": True, "result": resultat})
     except Echec as e:
