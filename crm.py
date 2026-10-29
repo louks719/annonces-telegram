@@ -92,6 +92,66 @@ def client_pour(session_str):
                           device_model="CRM Recrutement", system_version="GitHub", app_version="1.0")
 
 
+# ------------------------------------------------------------ session de secours
+async def creer_secours(job, acc, client):
+    """Ouvre une 2e connexion au compte (« CRM Secours ») : le code arrive dans la session principale,
+    qui le lit toute seule. Si la principale est coupée un jour, la secours prend le relais."""
+    me = await client.get_me()
+    phone = "+" + me.phone if me.phone else acc["phone"]
+    secours = TelegramClient(StringSession(""), API_ID, API_HASH, device_model="CRM Secours",
+                             system_version="GitHub", app_version="1.0")
+    await secours.connect()
+    try:
+        debut = time.time()
+        try:
+            sent = await secours.send_code_request(phone)
+        except errors.FloodWaitError as e:
+            raise Echec(f"Telegram demande d'attendre {e.seconds // 60 + 1} min avant de réessayer")
+        code = None
+        for _ in range(12):
+            await asyncio.sleep(5)
+            for msg in await client.get_messages(777000, limit=3):
+                trouve = re.search(r"\b(\d{5,6})\b", msg.message or "")
+                if trouve and msg.date.timestamp() >= debut - 10:
+                    code = trouve.group(1)
+                    break
+            if code:
+                break
+        if not code:
+            raise Echec("Telegram n'a pas envoyé le code dans la session principale, réessaie plus tard")
+        try:
+            await secours.sign_in(phone, code, phone_code_hash=sent.phone_code_hash)
+        except errors.SessionPasswordNeededError:
+            mdp = (job.get("payload") or {}).get("password")
+            if not mdp:
+                raise Echec("Ce compte a un mot de passe (validation en deux étapes) : tape-le dans « Session de secours » et recommence")
+            try:
+                await secours.sign_in(password=mdp)
+            except errors.PasswordHashInvalidError:
+                raise Echec("Mot de passe incorrect")
+        crm("POST", f"/runner/job/{job['id']}/account", {"session_backup_enc": chiffrer(secours.session.save())})
+        log("Session de secours créée.")
+        return {"ok": True}
+    finally:
+        await secours.disconnect()
+
+
+async def session_vivante(session_enc):
+    """Client connecté et autorisé pour cette session, ou None si elle est morte."""
+    if not session_enc:
+        return None
+    client = client_pour(dechiffrer(session_enc))
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            return client
+    except errors.RPCError as e:
+        if type(e).__name__ not in SESSION_MORTE:
+            raise
+    await client.disconnect()
+    return None
+
+
 # ------------------------------------------------------------ connexion d'un compte
 async def login_send(job, acc):
     client = client_pour("")
@@ -443,9 +503,16 @@ async def main(job_id):
         elif job["type"] == "import":
             await import_session(job, acc)
         else:
-            client = client_pour(dechiffrer(acc["session_enc"]))
-            await client.connect()
-            if not await client.is_user_authorized():
+            client = await session_vivante(acc["session_enc"])
+            if not client and acc.get("session_backup_enc"):
+                # la session principale est coupée : la session de secours prend le relais
+                client = await session_vivante(acc["session_backup_enc"])
+                if client:
+                    crm("POST", f"/runner/job/{job_id}/account", {
+                        "session_enc": acc["session_backup_enc"], "session_backup_enc": None, "backup_used": True,
+                        "status": "connected", "login_state": "connected", "login_error": None})
+                    log("Session principale coupée : la session de secours prend le relais.")
+            if not client:
                 crm("POST", f"/runner/job/{job_id}/account", {"status": "disconnected", "login_state": "idle"})
                 raise Echec("Le compte n'est plus connecté : clique sur Reconnecter dans le CRM")
             if job["type"] == "sync":
@@ -457,6 +524,8 @@ async def main(job_id):
                 resultat = await profil(job, client)
             elif job["type"] == "check":
                 await verifier_annonces(job, client, data.get("check") or [])
+            elif job["type"] == "backup":
+                resultat = await creer_secours(job, acc, client)
             elif job["type"] == "tgcode":
                 resultat = await lire_code(client)
             elif job["type"] == "spamcheck":
